@@ -1,9 +1,26 @@
 // ========================================================
+// カスタムメニュー
+// ========================================================
+function onOpen() {          // ← ここから追加
+  SpreadsheetApp.getUi()
+    .createMenu('🎯 営業ツール')
+    .addItem('A: サロン情報リサーチ（単体）', 'organizeSalonInfo')
+    .addItem('B: 5サロンサーチ', 'searchFiveSalons')
+    .addItem('C: メールサーチ実行', 'searchEmailAddresses_Salon')
+    .addItem('D: 次の送信候補を確認', 'previewNextMail_Salon')
+    .addItem('E: メール送信', 'sendMail_Salon')
+    .addToUi();
+}                            // ← ここまで追加
+
+// ========================================================
 // 大阪ヘアメイク美容室 リサーチ & メール送信ツール
 // KANSAI COLLECTION 協賛営業向け
 // ========================================================
 
-const MAIL_SUBJECT = '【GAKUSEI RUNWAY 2026 SUMMER】のご案内';
+const GEMINI_API_KEY = 'AIzaSyDcQMpv5N9O7n8sSue2dp0Om0qlK8mV4Jk';
+const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent';
+const SERP_API_KEY = 'aabe9443cad3f5928c7ac4a3f3efc4aa0cb0d0c19376eb58395902cc264cd869'
+const MAIL_SUBJECT_SALON = '【GAKUSEI RUNWAY 2026 SUMMER】のご案内'; // ✅ リネーム
 
 const SLEEP_SHORT  = 500;
 const SLEEP_MEDIUM = 1500;
@@ -28,9 +45,8 @@ const MAIL_BODY = `突然のご連絡失礼します。
 const COL_SALON    = 1;
 const COL_AREA     = 2;
 const COL_URL      = 3;
-const COL_HP_URL   = 4;
-const COL_STATUS   = 5;
-const COL_EMAIL    = 7;
+const COL_STATUS_SALON = 5; // ✅ リネーム
+const COL_EMAIL_SALON  = 9; // ✅ リネーム
 const START_ROW    = 5;
 const ATTACK_SHEET_NAME = 'アタックリスト';
 
@@ -63,13 +79,10 @@ function organizeSalonInfo() {
       return;
     }
 
-    const writeRow = getNextWriteRow(attackSheet);
+    const writeRow = getNextWriteRow_Salon(attackSheet); // ✅ リネーム
     attackSheet.getRange(writeRow, COL_SALON).setValue(result.officialName);
     attackSheet.getRange(writeRow, COL_AREA).setValue(result.area);
     attackSheet.getRange(writeRow, COL_URL).setValue(result.websiteUrl);
-
-    const hpUrl = fetchHotpepperUrl(result.officialName, result.area);
-    attackSheet.getRange(writeRow, COL_HP_URL).setValue(hpUrl);
 
     inputSheet.getRange('A1').clearContent();
     inputSheet.getRange('A2').setValue('✅ 完了！アタックリストの' + writeRow + '行目に追記しました。');
@@ -78,7 +91,6 @@ function organizeSalonInfo() {
       '✅ 完了\n\nサロン名: ' + result.officialName +
       '\nエリア: ' + result.area +
       '\n公式URL: ' + result.websiteUrl +
-      '\nホットペッパーURL: ' + hpUrl +
       '\n\n次に「メールサーチ実行」ボタンを押してください。'
     );
 
@@ -131,22 +143,18 @@ function searchFiveSalons() {
 
       let officialUrl = salon.url;
       if (!officialUrl || officialUrl === '不明' || !officialUrl.startsWith('http')) {
-        officialUrl = fetchUrlBySerpApi_Salon(salon.salonName + ' 美容室 大阪'); // ✅ リネーム
+        officialUrl = fetchUrlBySerpApi_Salon(salon.salonName + ' 美容室 大阪');
       } else {
         try {
           const checkRes = UrlFetchApp.fetch(officialUrl, { muteHttpExceptions: true, followRedirects: true });
           if (checkRes.getResponseCode() !== 200) {
-            officialUrl = fetchUrlBySerpApi_Salon(salon.salonName + ' 美容室 大阪'); // ✅ リネーム
+            officialUrl = fetchUrlBySerpApi_Salon(salon.salonName + ' 美容室 大阪');
           }
         } catch (e) {
-          officialUrl = fetchUrlBySerpApi_Salon(salon.salonName + ' 美容室 大阪'); // ✅ リネーム
+          officialUrl = fetchUrlBySerpApi_Salon(salon.salonName + ' 美容室 大阪');
         }
       }
       attackSheet.getRange(writeRow + addedCount, COL_URL).setValue(officialUrl);
-
-      Utilities.sleep(SLEEP_SHORT);
-      const hpUrl = fetchHotpepperUrl(salon.salonName, salon.area);
-      attackSheet.getRange(writeRow + addedCount, COL_HP_URL).setValue(hpUrl);
 
       addedCount++;
       Utilities.sleep(SLEEP_LONG);
@@ -171,7 +179,7 @@ function searchFiveSalons() {
 // ========================================================
 // 【機能C】メールアドレス自動サーチ
 // ========================================================
-function searchEmailAddresses_Salon() { // ✅ 機能Cも念のためリネーム（KC版と同名のため）
+function searchEmailAddresses_Salon() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(ATTACK_SHEET_NAME);
 
@@ -189,7 +197,7 @@ function searchEmailAddresses_Salon() { // ✅ 機能Cも念のためリネー�
   const ui = SpreadsheetApp.getUi();
   const confirm = ui.alert(
     'メールサーチ確認',
-    'G列が空白の行をサーチします。\nホットペッパーページを優先的に検索します。\nよろしいですか？',
+    'I列が空白の行をサーチします。\nホットペッパーページを優先的に検索します。\nよろしいですか？',
     ui.ButtonSet.YES_NO
   );
   if (confirm !== ui.Button.YES) return;
@@ -198,43 +206,29 @@ function searchEmailAddresses_Salon() { // ✅ 機能Cも念のためリネー�
   let foundCount  = 0;
 
   for (let row = START_ROW; row <= lastRow; row++) {
-    const emailCell = sheet.getRange(row, COL_EMAIL).getValue().toString().trim();
+    const emailCell = sheet.getRange(row, COL_EMAIL_SALON).getValue().toString().trim(); // ✅ リネーム
     if (emailCell !== '') continue;
 
     const salonName   = sheet.getRange(row, COL_SALON).getValue().toString().trim();
     const officialUrl = sheet.getRange(row, COL_URL).getValue().toString().trim();
-    const hpUrl       = sheet.getRange(row, COL_HP_URL).getValue().toString().trim();
     if (!salonName) continue;
 
     searchCount++;
     let email = '×';
 
     try {
-      if (hpUrl && hpUrl !== '不明' && hpUrl.startsWith('http')) {
-        Logger.log('[①HP] ' + salonName + ' : ' + hpUrl);
-        email = searchEmailFromHotpepper(salonName, hpUrl);
-      }
-
+      
       if (email === '×' && officialUrl && officialUrl !== '不明' && officialUrl.startsWith('http')) {
         Logger.log('[②公式] ' + salonName + ' : ' + officialUrl);
         email = searchEmailFromOfficialSite(salonName, officialUrl);
       }
 
-      if (email === '×') {
-        Logger.log('[③再取得] ' + salonName);
-        const newHpUrl = fetchHotpepperUrl(salonName, '');
-        if (newHpUrl && newHpUrl !== '不明' && newHpUrl.startsWith('http')) {
-          sheet.getRange(row, COL_HP_URL).setValue(newHpUrl);
-          email = searchEmailFromHotpepper(salonName, newHpUrl);
-        }
-      }
-
-      sheet.getRange(row, COL_EMAIL).setValue(email);
+      sheet.getRange(row, COL_EMAIL_SALON).setValue(email); // ✅ リネーム
       if (email !== '×') foundCount++;
       Utilities.sleep(SLEEP_LONG);
 
     } catch (e) {
-      sheet.getRange(row, COL_EMAIL).setValue('×');
+      sheet.getRange(row, COL_EMAIL_SALON).setValue('×'); // ✅ リネーム
       Logger.log('メールサーチエラー（' + salonName + '）: ' + e.toString());
     }
   }
@@ -250,7 +244,7 @@ function searchEmailAddresses_Salon() { // ✅ 機能Cも念のためリネー�
 // ========================================================
 // 【機能D】次の送信候補を確認
 // ========================================================
-function previewNextMail_Salon() { // ✅ リネーム
+function previewNextMail_Salon() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(ATTACK_SHEET_NAME);
 
@@ -266,23 +260,23 @@ function previewNextMail_Salon() { // ✅ リネーム
   }
 
   for (let row = START_ROW; row <= lastRow; row++) {
-    const status = sheet.getRange(row, COL_STATUS).getValue().toString().trim();
-    const email  = sheet.getRange(row, COL_EMAIL).getValue().toString().trim();
+    const status = sheet.getRange(row, COL_STATUS_SALON).getValue().toString().trim(); // ✅ リネーム
+    const email  = sheet.getRange(row, COL_EMAIL_SALON).getValue().toString().trim();  // ✅ リネーム
 
     if (status !== '') continue;
     if (email === '×') {
-      sheet.getRange(row, COL_STATUS).setValue('×（メールなし）');
+      sheet.getRange(row, COL_STATUS_SALON).setValue('×（メールなし）'); // ✅ リネーム
       continue;
     }
     if (email === '') continue;
 
     const salonName = sheet.getRange(row, COL_SALON).getValue().toString().trim();
-    PropertiesService.getScriptProperties().setProperty('currentTargetRow_Salon', row.toString()); // ✅ キー名も分離
+    PropertiesService.getScriptProperties().setProperty('currentTargetRow_Salon', row.toString());
 
     SpreadsheetApp.getUi().alert(
       '📧 送信候補プレビュー（' + row + '行目）\n\n' +
       'サロン名: ' + salonName + '\n送信先: ' + email +
-      '\n件名: ' + MAIL_SUBJECT +
+      '\n件名: ' + MAIL_SUBJECT_SALON + // ✅ リネーム
       '\n\n--- 本文プレビュー ---\n' + MAIL_BODY +
       '\n\n確認後「送信する」ボタンを押してください。'
     );
@@ -295,7 +289,7 @@ function previewNextMail_Salon() { // ✅ リネーム
 // ========================================================
 // 【機能E】メール送信
 // ========================================================
-function sendMail_Salon() { // ✅ リネーム
+function sendMail_Salon() {
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000);
@@ -305,7 +299,7 @@ function sendMail_Salon() { // ✅ リネーム
   }
 
   const scriptProps = PropertiesService.getScriptProperties();
-  const targetRow   = parseInt(scriptProps.getProperty('currentTargetRow_Salon')); // ✅ キー名も分離
+  const targetRow   = parseInt(scriptProps.getProperty('currentTargetRow_Salon'));
   const ss          = SpreadsheetApp.getActiveSpreadsheet();
   const sheet       = ss.getSheetByName(ATTACK_SHEET_NAME);
 
@@ -316,8 +310,8 @@ function sendMail_Salon() { // ✅ リネーム
     }
 
     const salonName = sheet.getRange(targetRow, COL_SALON).getValue().toString().trim();
-    const email     = sheet.getRange(targetRow, COL_EMAIL).getValue().toString().trim();
-    const status    = sheet.getRange(targetRow, COL_STATUS).getValue().toString().trim();
+    const email     = sheet.getRange(targetRow, COL_EMAIL_SALON).getValue().toString().trim();   // ✅ リネーム
+    const status    = sheet.getRange(targetRow, COL_STATUS_SALON).getValue().toString().trim();  // ✅ リネーム
 
     if (status === '○' || status === '送信中') {
       SpreadsheetApp.getUi().alert('この行はすでに送信済みまたは送信中です。\n「次の送信候補を確認」ボタンを押してください。');
@@ -326,7 +320,7 @@ function sendMail_Salon() { // ✅ リネーム
 
     if (!email || email === '×') {
       SpreadsheetApp.getUi().alert('メールアドレスがありません。スキップします。');
-      sheet.getRange(targetRow, COL_STATUS).setValue('×（メールなし）');
+      sheet.getRange(targetRow, COL_STATUS_SALON).setValue('×（メールなし）'); // ✅ リネーム
       return;
     }
 
@@ -338,27 +332,27 @@ function sendMail_Salon() { // ✅ リネーム
     );
     if (confirm !== ui.Button.YES) return;
 
-    sheet.getRange(targetRow, COL_STATUS).setValue('送信中');
+    sheet.getRange(targetRow, COL_STATUS_SALON).setValue('送信中'); // ✅ リネーム
     SpreadsheetApp.flush();
 
-    GmailApp.sendEmail(email, MAIL_SUBJECT, MAIL_BODY, {
+    GmailApp.sendEmail(email, MAIL_SUBJECT_SALON, MAIL_BODY, { // ✅ リネーム
       name: '笹崎（株式会社KANSAI COLLECTION）',
       charset: 'UTF-8'
     });
 
-    sheet.getRange(targetRow, COL_STATUS).setValue('○');
+    sheet.getRange(targetRow, COL_STATUS_SALON).setValue('○'); // ✅ リネーム
     SpreadsheetApp.getUi().alert('✅ 送信完了！\n\nサロン名: ' + salonName + '\n送信先: ' + email);
 
   } catch (e) {
     if (sheet && targetRow >= START_ROW) {
-      const currentStatus = sheet.getRange(targetRow, COL_STATUS).getValue().toString().trim();
-      if (currentStatus === '送信中') sheet.getRange(targetRow, COL_STATUS).setValue('');
+      const currentStatus = sheet.getRange(targetRow, COL_STATUS_SALON).getValue().toString().trim(); // ✅ リネーム
+      if (currentStatus === '送信中') sheet.getRange(targetRow, COL_STATUS_SALON).setValue(''); // ✅ リネーム
     }
     Logger.log('メール送信エラー: ' + e.toString());
     SpreadsheetApp.getUi().alert('❌ 送信エラー: ' + e.message + '\n\n送信ステータスをリセットしました。再度お試しください。');
 
   } finally {
-    scriptProps.deleteProperty('currentTargetRow_Salon'); // ✅ キー名も分離
+    scriptProps.deleteProperty('currentTargetRow_Salon');
     lock.releaseLock();
   }
 }
@@ -474,7 +468,7 @@ function searchEmailFromHotpepper(salonName, hpUrl) {
     const mailtoRegex = /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
     let m;
     while ((m = mailtoRegex.exec(html)) !== null) {
-      if (isValidEmailCandidate_Salon(m[1]) && extractedEmails.indexOf(m[1]) === -1) { // ✅ リネーム
+      if (isValidEmailCandidate_Salon(m[1]) && extractedEmails.indexOf(m[1]) === -1) {
         extractedEmails.unshift(m[1]);
       }
     }
@@ -482,7 +476,7 @@ function searchEmailFromHotpepper(salonName, hpUrl) {
     const allEmails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
     if (allEmails) {
       allEmails.forEach(function(addr) {
-        if (isValidEmailCandidate_Salon(addr) && extractedEmails.indexOf(addr) === -1) { // ✅ リネーム
+        if (isValidEmailCandidate_Salon(addr) && extractedEmails.indexOf(addr) === -1) {
           extractedEmails.push(addr);
         }
       });
@@ -513,7 +507,7 @@ function searchEmailFromHotpepper(salonName, hpUrl) {
     }
 
     if (extractedEmails.length === 0) return '×';
-    return filterEmailByGemini_Salon(salonName, extractedEmails); // ✅ リネーム
+    return filterEmailByGemini_Salon(salonName, extractedEmails);
 
   } catch (e) {
     Logger.log('HPサーチエラー（' + salonName + '）: ' + e.toString());
@@ -550,7 +544,7 @@ function searchEmailFromOfficialSite(salonName, officialUrl) {
   }
 
   if (extractedEmails.length === 0) return '×';
-  return filterEmailByGemini_Salon(salonName, extractedEmails); // ✅ リネーム
+  return filterEmailByGemini_Salon(salonName, extractedEmails);
 }
 
 // ========================================================
@@ -572,13 +566,13 @@ function searchEmailsFromPage(url) {
     const mailtoRegex = /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
     let m;
     while ((m = mailtoRegex.exec(html)) !== null) {
-      if (isValidEmailCandidate_Salon(m[1]) && emails.indexOf(m[1]) === -1) emails.unshift(m[1]); // ✅ リネーム
+      if (isValidEmailCandidate_Salon(m[1]) && emails.indexOf(m[1]) === -1) emails.unshift(m[1]);
     }
 
     const all = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
     if (all) {
       all.forEach(function(addr) {
-        if (isValidEmailCandidate_Salon(addr) && emails.indexOf(addr) === -1) emails.push(addr); // ✅ リネーム
+        if (isValidEmailCandidate_Salon(addr) && emails.indexOf(addr) === -1) emails.push(addr);
       });
     }
   } catch (e) {
@@ -623,7 +617,6 @@ function fetchHotpepperUrl(salonName, area) {
 // ✅ リネーム済み共通関数群
 // ========================================================
 
-// KC版の fetchUrlBySerpApi と区別するためリネーム
 function fetchUrlBySerpApi_Salon(query) {
   try {
     const encodedQuery = encodeURIComponent(query);
@@ -653,7 +646,6 @@ function fetchUrlBySerpApi_Salon(query) {
   }
 }
 
-// KC版の filterEmailByGemini と区別するためリネーム
 function filterEmailByGemini_Salon(salonName, candidates) {
   const filterPrompt =
     '以下のメールアドレス一覧の中から、美容室「' + salonName + '」への営業メール送信先として最も適切なものを1つ選んでください。\n' +
@@ -690,7 +682,6 @@ function filterEmailByGemini_Salon(salonName, candidates) {
   }
 }
 
-// KC版の isValidEmailCandidate と区別するためリネーム
 function isValidEmailCandidate_Salon(email) {
   const invalidPatterns = [
     '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp',
@@ -718,7 +709,7 @@ function getExistingNames(sheet) {
 // ========================================================
 // ヘルパー：次の書き込み行を取得
 // ========================================================
-function getNextWriteRow(sheet) {
+function getNextWriteRow_Salon(sheet) { // ✅ リネーム
   const lastRow = sheet.getLastRow();
   if (lastRow < START_ROW) return START_ROW;
   return lastRow + 1;
