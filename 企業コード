@@ -1,0 +1,943 @@
+
+// ========================================================
+// KANSAI COLLECTION 企業リサーチ & メール送信ツール
+// 統合版
+// ========================================================
+
+const GEMINI_API_KEY = 'AIzaSyC9gm3z4S1zWfJYXGljvIDRHn5aKdVMfTQ';
+const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent';
+const SERP_API_KEY = 'aabe9443cad3f5928c7ac4a3f3efc4aa0cb0d0c19376eb58395902cc264cd869';
+const VALID_CATEGORIES = ['香水', '飲食', '美容', 'アパレル', 'その他'];
+
+const MAIL_SUBJECT = '【KANSAI COLLECTION 2026 AUTUMN & WINTER】のご案内';
+const MAIL_TEMPLATE = `{{COMPANY_NAME}}様
+
+突然のご連絡失礼します。
+株式会社KANSAI COLLECTION 企画部にて
+アカウントエグゼクティブを務めております、笹崎と申します。
+
+今回は『KANSAI COLLECTION 2026 AUTUMN & WINTER』にて、貴社とご一緒にお取り組みできないかと思いご連絡差しあげました。
+
+{{GEM_TEXT}}
+
+さて、『KANSAI COLLECTION』は京セラドームで開催される国内最大級のファッション＆エンターテインメントイベントとなっており、前回の『KANSAI COLLECTION 2026 SPRING & SUMMER』では約27,900人の動員数を達成いたしました。
+
+本イベントでは、人気モデル・アーティスト・インフルエンサーが多数出演し、流行に敏感なZ世代を対象に直接アプローチできる点が大きな特徴です。
+また、他社イベントとは違い、弊社イベントでは終始撮影OKな体制を整えていることから特に来場者によるSNS拡散や各種メディアでの拡散力も高く、UGCによる大きなプロモーション効果が期待できます。
+
+先ずは当社のことをより知っていただき、
+内容について簡単にご説明をさせていただきたく存じますので
+30分程度お時間をいただくことは可能でしょうか。
+
+ご多用のところ恐れ入りますが、ご検討の程よろしくお願いします。
+
+株式会社KANSAI COLLECTION
+笹崎`;
+
+const COL_COMPANY = 1;
+const COL_URL     = 3;
+const COL_GEMTEXT = 6;
+const COL_STATUS  = 7;
+const COL_EMAIL   = 9;
+const START_ROW   = 5;
+const ATTACK_SHEET_NAME = 'アタックリスト';
+
+// ========================================================
+// 【機能A】企業情報リサーチ＆カテゴリ振り分け
+// 入力シートの「企業リサーチ実行」ボタンに割り当て
+// ========================================================
+function organizeCompanyInfo() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const inputSheet = ss.getSheets()[0];
+  const companyName = inputSheet.getRange('A1').getValue().toString().trim();
+
+  if (!companyName) {
+    SpreadsheetApp.getUi().alert('A1セルに企業名を入力してください。');
+    return;
+  }
+
+  inputSheet.getRange('A2').setValue('🔍 リサーチ中...');
+  SpreadsheetApp.flush();
+
+  try {
+    const result = callGeminiAPI(companyName);
+    if (!result) {
+      inputSheet.getRange('A2').setValue('❌ APIエラー: 結果を取得できませんでした');
+      return;
+    }
+
+    const targetSheetName = resolveTargetSheet(result.category);
+    const targetSheet = ss.getSheetByName(targetSheetName);
+    if (!targetSheet) {
+      inputSheet.getRange('A2').setValue('❌ シートエラー: "' + targetSheetName + '" が見つかりません');
+      return;
+    }
+
+    const writeRow = getNextWriteRow(targetSheet);
+    targetSheet.getRange(writeRow, 1).setValue(result.officialName);
+    targetSheet.getRange(writeRow, 3).setValue(result.websiteUrl);
+    targetSheet.getRange(writeRow, 4).setValue(result.emailAddress);
+
+    inputSheet.getRange('A1').clearContent();
+    inputSheet.getRange('A2').setValue('✅ 完了！「' + targetSheetName + '」シートの' + writeRow + '行目に追記しました。');
+
+    SpreadsheetApp.getUi().alert(
+      '✅ 完了\n\n' +
+      '企業名: ' + result.officialName + '\n' +
+      '振り分け先: 「' + targetSheetName + '」シート (' + writeRow + '行目)\n' +
+      'URL: ' + result.websiteUrl + '\n' +
+      'メール: ' + result.emailAddress
+    );
+
+  } catch (e) {
+    inputSheet.getRange('A2').setValue('❌ エラー: ' + e.message);
+    Logger.log('エラー詳細: ' + e.toString());
+    SpreadsheetApp.getUi().alert('エラーが発生しました:\n' + e.message);
+  }
+}
+
+// ========================================================
+// 【機能B】5社サーチ＆アタックリスト自動記入
+// 入力シートの「5社サーチ実行」ボタンに割り当て
+// ========================================================
+function searchFiveCompanies() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const inputSheet = ss.getSheets()[0];
+
+  const keyword = '飲食・ファッション・美容・ウェルビーイング系のD2C・ベンチャー・オーナー企業から関西コレクションへの協賛投資価値が高い企業を独自に選定してください。毎回異なる企業を選んでください。';
+
+  inputSheet.getRange('A5').setValue('🔍 5社サーチ中...');
+  SpreadsheetApp.flush();
+
+  try {
+    // ── 修正①：既存企業名を取得して重複チェックに使用 ──────────────────
+    const attackSheet = ss.getSheetByName(ATTACK_SHEET_NAME);
+    if (!attackSheet) {
+      inputSheet.getRange('A5').setValue('❌ 「' + ATTACK_SHEET_NAME + '」シートが見つかりません');
+      return;
+    }
+
+    const existingNames = getExistingCompanyNames(attackSheet);
+    // ─────────────────────────────────────────────────────────────────────
+
+    const companies = searchFiveCompaniesByGemini(keyword, existingNames);
+
+    if (!companies || companies.length === 0) {
+      inputSheet.getRange('A5').setValue('❌ 企業が取得できませんでした');
+      return;
+    }
+
+    const lastRow = attackSheet.getLastRow();
+    let writeRow = lastRow < START_ROW ? START_ROW : lastRow + 1;
+
+    // ── 修正①：重複企業をスキップして追記 ───────────────────────────────
+    let addedCount = 0;
+    for (let i = 0; i < companies.length; i++) {
+      const company = companies[i];
+      if (existingNames.indexOf(company.companyName) !== -1) {
+        Logger.log('重複スキップ: ' + company.companyName);
+        continue;
+      }
+      attackSheet.getRange(writeRow + addedCount, COL_COMPANY).setValue(company.companyName);
+
+      // URL生死確認 → 死んでいればSerpApiで修正
+      let verifiedUrl = company.url;
+      if (verifiedUrl && verifiedUrl !== '不明' && verifiedUrl.startsWith('http')) {
+        try {
+          const checkRes = UrlFetchApp.fetch(verifiedUrl, {
+            muteHttpExceptions: true,
+            followRedirects: true
+          });
+          if (checkRes.getResponseCode() !== 200) {
+            Logger.log('URL無効→SerpApi修正: ' + verifiedUrl);
+            verifiedUrl = fetchUrlBySerpApi(company.companyName);
+          }
+        } catch (e) {
+          Logger.log('URLチェックエラー→SerpApi修正: ' + e.toString());
+          verifiedUrl = fetchUrlBySerpApi(company.companyName);
+        }
+      } else {
+        verifiedUrl = fetchUrlBySerpApi(company.companyName);
+      }
+
+      attackSheet.getRange(writeRow + addedCount, COL_URL).setValue(verifiedUrl);
+      attackSheet.getRange(writeRow + addedCount, COL_GEMTEXT).setValue(company.mailText);
+      addedCount++;
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    const skippedCount = companies.length - addedCount;
+    const resultMsg = addedCount > 0
+      ? 'アタックリストの' + writeRow + '行目から' + addedCount + '社を追記しました。'
+        + (skippedCount > 0 ? '\n（重複 ' + skippedCount + '社はスキップ）' : '')
+      : '追記できる新規企業がありませんでした。\n（全' + skippedCount + '社が重複）';
+
+    inputSheet.getRange('A5').setValue('✅ 完了！' + resultMsg);
+    SpreadsheetApp.getUi().alert('✅ 5社サーチ完了！\n\n' + resultMsg + '\n次に「メールサーチ実行」ボタンを押してください。');
+
+  } catch (e) {
+    inputSheet.getRange('A5').setValue('❌ エラー: ' + e.message);
+    Logger.log('エラー詳細: ' + e.toString());
+    SpreadsheetApp.getUi().alert('エラーが発生しました:\n' + e.message);
+  }
+}
+
+// ========================================================
+// 【機能C】メールアドレス自動サーチ
+// 「メールサーチ実行」ボタンに割り当て
+// ========================================================
+function searchEmailAddresses() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(ATTACK_SHEET_NAME);
+
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('「' + ATTACK_SHEET_NAME + '」シートが見つかりません。');
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < START_ROW) {
+    SpreadsheetApp.getUi().alert('データがありません。');
+    return;
+  }
+
+  const ui = SpreadsheetApp.getUi();
+  const confirm = ui.alert(
+    'メールサーチ確認',
+    'I列が空白または×の行をサーチします。\nよろしいですか？',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  let searchCount = 0;
+  let foundCount = 0;
+
+  for (let row = START_ROW; row <= lastRow; row++) {
+    const emailCell = sheet.getRange(row, COL_EMAIL).getValue().toString().trim();
+    if (emailCell !== '') continue;
+
+    const companyName = sheet.getRange(row, COL_COMPANY).getValue().toString().trim();
+    const url = sheet.getRange(row, COL_URL).getValue().toString().trim();
+    if (!companyName) continue;
+
+    searchCount++;
+
+    try {
+      const email = searchEmailAdvanced(companyName, url);
+      sheet.getRange(row, COL_EMAIL).setValue(email);
+      if (email !== '×') foundCount++;
+      Utilities.sleep(2000);
+    } catch (e) {
+      sheet.getRange(row, COL_EMAIL).setValue('×');
+      Logger.log('メールサーチエラー（' + companyName + '）: ' + e.toString());
+    }
+  }
+
+  SpreadsheetApp.getUi().alert(
+    '✅ メールサーチ完了\n\n' +
+    '検索件数: ' + searchCount + '件\n' +
+    '取得成功: ' + foundCount + '件\n' +
+    '取得失敗: ' + (searchCount - foundCount) + '件'
+  );
+}
+
+// ========================================================
+// 【機能D】次の送信候補を確認
+// 「次の送信候補を確認」ボタンに割り当て
+// ========================================================
+function previewNextMail() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(ATTACK_SHEET_NAME);
+
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('「' + ATTACK_SHEET_NAME + '」シートが見つかりません。');
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < START_ROW) {
+    SpreadsheetApp.getUi().alert('データがありません。');
+    return;
+  }
+
+  for (let row = START_ROW; row <= lastRow; row++) {
+    const status = sheet.getRange(row, COL_STATUS).getValue().toString().trim();
+    const email  = sheet.getRange(row, COL_EMAIL).getValue().toString().trim();
+
+    if (status !== '') continue;
+    if (email === '×') {
+      sheet.getRange(row, COL_STATUS).setValue('×（メールなし）');
+      continue;
+    }
+    if (email === '') continue;
+
+    const companyName = sheet.getRange(row, COL_COMPANY).getValue().toString().trim();
+    const gemText     = sheet.getRange(row, COL_GEMTEXT).getValue().toString().trim();
+    const mailBody = MAIL_TEMPLATE
+      .replace('{{COMPANY_NAME}}', companyName)
+      .replace('{{GEM_TEXT}}', gemText);
+
+    PropertiesService.getScriptProperties().setProperty('currentTargetRow', row.toString());
+
+    SpreadsheetApp.getUi().alert(
+      '📧 送信候補プレビュー（' + row + '行目）\n\n' +
+      '企業名: ' + companyName + '\n' +
+      '送信先: ' + email + '\n' +
+      '件名: ' + MAIL_SUBJECT + '\n\n' +
+      '--- 本文プレビュー ---\n' +
+      mailBody + '\n\n' +
+      '確認後「送信する」ボタンを押してください。'
+    );
+    return;
+  }
+
+  SpreadsheetApp.getUi().alert('✅ 未送信の候補がありません。全件完了しています。');
+}
+
+// ========================================================
+// 【機能E】メール送信
+// 「送信する」ボタンに割り当て
+// ========================================================
+function sendMail() {
+  // ── 修正②：LockServiceで二重送信を防止 ──────────────────────────────
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000); // 10秒待ってロック取得、取得できなければ例外
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('⚠️ 別の送信処理が実行中です。しばらくお待ちください。');
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────
+
+  try {
+    const scriptProps = PropertiesService.getScriptProperties();
+    const targetRow = parseInt(scriptProps.getProperty('currentTargetRow'));
+
+    if (!targetRow || targetRow < START_ROW) {
+      SpreadsheetApp.getUi().alert('先に「次の送信候補を確認」ボタンを押してください。');
+      return;
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(ATTACK_SHEET_NAME);
+
+    const companyName = sheet.getRange(targetRow, COL_COMPANY).getValue().toString().trim();
+    const email       = sheet.getRange(targetRow, COL_EMAIL).getValue().toString().trim();
+    const gemText     = sheet.getRange(targetRow, COL_GEMTEXT).getValue().toString().trim();
+    const status      = sheet.getRange(targetRow, COL_STATUS).getValue().toString().trim();
+
+    if (status === '○' || status === '送信中') {
+      SpreadsheetApp.getUi().alert('この行はすでに送信済みまたは送信中です。\n「次の送信候補を確認」ボタンを押してください。');
+      return;
+    }
+
+    if (!email || email === '×') {
+      SpreadsheetApp.getUi().alert('メールアドレスがありません。スキップします。');
+      sheet.getRange(targetRow, COL_STATUS).setValue('×（メールなし）');
+      scriptProps.deleteProperty('currentTargetRow');
+      return;
+    }
+
+    const ui = SpreadsheetApp.getUi();
+    const confirm = ui.alert(
+      '送信確認',
+      '以下の内容でメールを送信します。\n\n' +
+      '企業名: ' + companyName + '\n' +
+      '送信先: ' + email + '\n\n' +
+      'よろしいですか？',
+      ui.ButtonSet.YES_NO
+    );
+    if (confirm !== ui.Button.YES) return;
+
+    // ── 修正②：送信前に「送信中」を書き込んでから実際に送信 ─────────────
+    sheet.getRange(targetRow, COL_STATUS).setValue('送信中');
+    SpreadsheetApp.flush();
+    // ─────────────────────────────────────────────────────────────────────
+
+    const mailBody = MAIL_TEMPLATE
+      .replace('{{COMPANY_NAME}}', companyName)
+      .replace('{{GEM_TEXT}}', gemText);
+
+    GmailApp.sendEmail(email, MAIL_SUBJECT, mailBody, {
+      name: '笹崎（株式会社KANSAI COLLECTION）',
+      charset: 'UTF-8'
+    });
+
+    sheet.getRange(targetRow, COL_STATUS).setValue('○');
+    scriptProps.deleteProperty('currentTargetRow');
+
+    SpreadsheetApp.getUi().alert(
+      '✅ 送信完了！\n\n' +
+      '企業名: ' + companyName + '\n' +
+      '送信先: ' + email
+    );
+
+  } catch (e) {
+    Logger.log('メール送信エラー: ' + e.toString());
+    SpreadsheetApp.getUi().alert('❌ 送信エラー: ' + e.message);
+  } finally {
+    // ── 修正②：処理完了後に必ずロックを解放 ────────────────────────────
+    lock.releaseLock();
+    // ─────────────────────────────────────────────────────────────────────
+  }
+}
+
+// ========================================================
+// 共通関数：Gemini API呼び出し（カテゴリ振り分け用）
+// ========================================================
+function callGeminiAPI(companyName) {
+  const prompt =
+    '企業名「' + companyName + '」について以下のJSONのみ返してください。説明不要。\n' +
+    '{"officialName":"正式名称","category":"香水/飲食/美容/アパレル/その他のどれか","websiteUrl":"URL or 不明","emailAddress":"メール or 不明"}';
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 256 }
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(GEMINI_ENDPOINT + '?key=' + GEMINI_API_KEY, options);
+  const responseCode = response.getResponseCode();
+  const responseText = response.getContentText();
+
+  if (responseCode !== 200) {
+    throw new Error('Gemini APIエラー (HTTP ' + responseCode + '): ' + responseText.substring(0, 200));
+  }
+
+  const responseJson = JSON.parse(responseText);
+  let rawText = '';
+  try {
+    rawText = responseJson.candidates[0].content.parts[0].text;
+  } catch (e) {
+    throw new Error('APIレスポンスの構造が予期しない形式です。');
+  }
+
+  let cleanedText = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('JSONを抽出できませんでした。');
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    throw new Error('JSONのパースに失敗しました。');
+  }
+
+  return {
+    officialName: parsed.officialName || companyName,
+    category:     parsed.category     || 'その他',
+    websiteUrl:   parsed.websiteUrl   || '不明',
+    emailAddress: parsed.emailAddress || '不明'
+  };
+}
+
+// ========================================================
+// 共通関数：Geminiで5社サーチ（プロンプト完全版）
+// ── 修正①：existingNamesを受け取りプロンプトに除外リストとして組み込む
+// ========================================================
+function searchFiveCompaniesByGemini(keyword, existingNames) {
+  // 既存企業リストをプロンプトに埋め込む
+  const exclusionText = existingNames && existingNames.length > 0
+    ? '\n【除外リスト（すでにリスト済みのため絶対に選ばないこと）】\n' + existingNames.join('、') + '\n'
+    : '';
+
+  const prompt =
+    'あなたは、関西コレクション（関コレ）の協賛枠を販売する、百戦練磨のシニア・企業アナリスト兼戦略営業コンサルタントです。\n' +
+    'ターゲットとする急成長中のオーナー企業・D2Cブランド・ベンチャー企業・認知拡大を狙う大企業・関西コレクションと親和性の高い企業に対し、100万〜500万円の予算を決算できるような企業の極めて精度の高いアタックリストを作成してください。\n\n' +
+    '【ターゲット選定基準】\n' +
+    '1. 商材特性: 飲食・ファッション・美容・ウェルビーイング等、関西コレクションとの親和性の高い分野\n' +
+    '2. 意思決定構造: 指定なし\n' +
+    '3. ブランド特性: D2C・ベンチャー・急成長中の企業・大手企業・認知拡大を狙う大企業も含む\n\n' +
+    '4. 10代20代への露出、アプローチを求めている企業\n' +
+    '5. 10代20代との関わり、親和性が高い企業\n' +
+    '6. 10代20代に人気のある商品の販売。開発を行う企業\n' +
+    '7. 実在性: 必ず実在する日本の企業及び韓国の企業のみを選定すること。架空の企業は絶対に含めないこと。\n\n' +
+    exclusionText +
+    '【検索条件】\n' +
+    keyword + '\n\n' +
+    '【メール文章の作成ルール】\n' +
+    '- 文章量は150字程度\n' +
+    '- 企業名・挨拶文・「〜様」は含めず本文のみを出力すること\n' +
+    '- ターゲット企業の経営理念や注力分野を深く洞察し、独自性のある文脈で接続すること\n' +
+    '- インフルエンサーに直接体験・心酔してもらう場としての希少性を訴求すること\n' +
+    '- SNSネットワークの希少性をWeb広告と比較して強調すること\n' +
+    '- テンプレート感を排除し、企業の独自性・経営理念・志への共感を反映させること\n' +
+    '- AI味を可能な限り排除しつつビジネス的な文言で作成すること\n' +
+    '- 疑問形（〜しませんか？等）は使用しないこと\n' +
+    '- 過剰な賞賛は控えること\n' +
+    '- 「〜様」「はじめまして」等の冒頭挨拶は使用しないこと\n' +
+    '- 丁寧な断定形または体言止めで締めること\n' +
+    '- 文の初めを『貴社の〜』から初めること\n' +
+    '- 文末を『〜に魅力を感じました』で終わらせること\n' +
+    '- くどすぎず、スマートかつ誠実な文章を心がけること\n' +
+    '- 先方に送信する文章として適切なものを生成してください\n\n' +
+     '【AI味を排除するための7原則】\n' +
+    '1. 論理の飛躍を恐れない: 単なる三段論法ではなく、書き手の熱量や独自の視点を加えること\n' +
+    '2. 抽象的なバズワードの禁止: 「共感」「コンテンツ」「強力な」といった安易な言葉に頼らず、具体的な状況やベネフィットを描写すること\n' +
+    '3. リズムの変化: 全ての文を同じ長さにせず、短文と長文を混ぜ、体言止めも適宜使用してリズムを作ること\n' +
+    '4. 構文の固定化を避ける: 「AはBなのでCです」という入れ子構造を連発しないこと\n' +
+    '5. 摩擦と意志: 「〜と考えられる」といった中立的な推量ではなく、「〜だと確信している」「〜にしたい」という提案者の主体性を見せること\n' +
+    '6. コロケーションの破壊: 統計的に予測しやすい語の結びつき（例: 親和性が高い）に、具体的な実例を添えて手触り感を与えること\n' +
+    '7. 心理的距離の最適化: 丁寧すぎず、かつ失礼のない、相手の懐に飛び込むような誠実なトーンを維持すること\n\n' +
+    '【具体的な改善指示】\n' +
+    '- 文末の統一: 「〜ます」「〜でしょう」を無意味に混ぜず、提案書・メールとしての責任ある語尾（〜と考えております、〜幸いです等）に統一すること\n' +
+    '- 横文字の厳選: カタカナ語を多用せず、できるだけ具体的な日本語で描写すること\n\n' +
+    '【文体参考例】\n' +
+    '以下の文体・トーンを参考にして150字の文章を生成すること。\n' +
+    '例1: 近年、様々なセレクトショップなどで貴社の商品を目にする機会が多く、その存在感に注目しておりました。中でもSNSを中心に爆発的に流行しましたリードルショットは私自身愛用させていただいており、貴社は天然マイクロリードル界のリーディングカンパニー的な位置付けにあるのかなと実感しております。\n' +
+    '例2: 近年、貴社がプロデュースされる香水をSNSや雑誌などで拝見する機会も多く、その独自の存在感に注目しておりました。貴社のフレグランスはユニセックスで日常的に使いなど利用者に寄り添った調合と情景を表現した芸術性に唯一無二の価値を感じております。\n\n' +
+    '【出力形式】\n' +
+    '以下のJSONのみ返してください。Markdownのコードブロックや説明文は絶対に含めないこと。\n' +
+    '{\n' +
+    '  "companies": [\n' +
+    '    {\n' +
+    '      "companyName": "企業名",\n' +
+    '      "url": "公式サイトURL（https://から始まる完全な形式。トップページのみでよい。不明な場合は不明と返すこと。絶対に架空のURLを作らないこと）",\n' +
+    '      "mailText": "150字程度の営業文章（本文のみ）"\n' +
+    '    }\n' +
+    '  ]\n' +
+    '}\n\n' +
+    'companiesは必ず5件返してください。';
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 16000
+    }
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(GEMINI_ENDPOINT + '?key=' + GEMINI_API_KEY, options);
+  const responseCode = response.getResponseCode();
+  const responseText = response.getContentText();
+
+  if (responseCode !== 200) {
+    throw new Error('Gemini APIエラー (HTTP ' + responseCode + '): ' + responseText.substring(0, 200));
+  }
+
+  const responseJson = JSON.parse(responseText);
+  let rawText = '';
+  try {
+    rawText = responseJson.candidates[0].content.parts[0].text;
+  } catch (e) {
+    throw new Error('APIレスポンスの構造が予期しない形式です。レスポンス: ' + responseText.substring(0, 300));
+  }
+
+  Logger.log('5社サーチ生テキスト: ' + rawText);
+
+  let cleanedText = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    Logger.log('JSON抽出失敗。生テキスト全文: ' + rawText);
+    throw new Error('JSONを抽出できませんでした。Gemini応答の先頭: ' + rawText.substring(0, 200));
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    throw new Error('JSONのパースに失敗しました。');
+  }
+
+  const companies = parsed.companies || [];
+  return companies.map(company => {
+    let mailText = company.mailText || '';
+    mailText = mailText.replace(/<br\s*\/?>/gi, '');
+    mailText = mailText.replace(/「[^」]*」様[、。\s]*/g, '');
+    mailText = mailText.replace(/はじめまして[。、\s]*/g, '');
+    mailText = mailText.trim();
+    return {
+      companyName: company.companyName || '',
+      url:         company.url         || '不明',
+      mailText:    mailText
+    };
+  });
+}
+
+// ========================================================
+// 共通関数：高精度メールアドレスサーチ（特定商取引法ページ特化版）
+//
+// 【探索戦略】
+//   STEP1: officialUrlが未設定ならGeminiでURL推定
+//   STEP2: 特商法ページの候補URLを網羅的に生成（パス・日本語表記の揺れに対応）
+//   STEP3: 各ページのHTMLを取得し、特商法セクション周辺を優先的にパース
+//   STEP4: 抽出候補をGeminiでフィルタリングして最適な1件を返す
+//   STEP5: 全ページで見つからなかった場合のみ × を返す
+// ========================================================
+function searchEmailAdvanced(companyName, existingUrl) {
+
+// STEP1: URLの確保（5社サーチ時に検証済みのためC列をそのまま使用）
+  const officialUrl = (existingUrl || '').trim();
+  if (!officialUrl || officialUrl === '不明' || !officialUrl.startsWith('http')) {
+    Logger.log('URL未設定のためスキップ: ' + companyName);
+    return '×';
+  }
+
+  // STEP2: 特商法ページの候補URLを網羅的に生成
+  // 日本のECサイト・D2Cブランドでよく使われるパスパターンを網羅
+  const baseUrl = officialUrl.replace(/\/$/, '');
+  const tokushouUrls = [
+    // ── 日本語ディレクトリ系
+    baseUrl + '/tokushouhou',
+    baseUrl + '/tokushouhou.html',
+    baseUrl + '/tokusho',
+    baseUrl + '/tokusho.html',
+    // ── 英語ディレクトリ系
+    baseUrl + '/legal',
+    baseUrl + '/legal.html',
+    baseUrl + '/law',
+    baseUrl + '/law.html',
+    baseUrl + '/trade-law',
+    baseUrl + '/trade-law.html',
+    baseUrl + '/specified-commercial-transactions',
+    // ── company配下
+    baseUrl + '/company/tokushouhou',
+    baseUrl + '/company/tokushouhou.html',
+    baseUrl + '/company/legal',
+    baseUrl + '/company/law',
+    baseUrl + '/company/law.html',
+    // ── help・policy・about配下
+    baseUrl + '/help/tokushouhou',
+    baseUrl + '/help/law',
+    baseUrl + '/policy/tokushouhou',
+    baseUrl + '/about/tokushouhou',
+    baseUrl + '/about/legal',
+  ];
+
+  Utilities.sleep(1000);
+
+  // STEP3: 各ページをフェッチしてメールを抽出
+  const extractedEmails = [];
+
+  for (let i = 0; i < tokushouUrls.length; i++) {
+    const targetUrl = tokushouUrls[i];
+    try {
+      const htmlResponse = UrlFetchApp.fetch(targetUrl, {
+        muteHttpExceptions: true,
+        followRedirects: true
+      });
+
+      const statusCode = htmlResponse.getResponseCode();
+      if (statusCode !== 200) {
+        Logger.log('スキップ（HTTP ' + statusCode + '）: ' + targetUrl);
+        continue;
+      }
+
+      Logger.log('特商法ページ取得成功: ' + targetUrl);
+
+      const rawHtml = htmlResponse.getContentText().substring(0, 150000);
+
+      // ── HTMLをデコード（エンティティ・パーセントエンコード両対応）─────────
+      let html = rawHtml
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#64;/g, '@')          // &#64; → @
+        .replace(/&#x40;/g, '@')         // &#x40; → @
+        .replace(/\[at\]/gi, '@')        // [at] 表記
+        .replace(/\(at\)/gi, '@')        // (at) 表記
+        .replace(/【at】/gi, '@');       // 【at】表記
+      try {
+        html = decodeURIComponent(html.replace(/\+/g, ' '));
+      } catch (e) { /* デコード失敗は無視してrawのまま使用 */ }
+      // ─────────────────────────────────────────────────────────────────
+
+      // ── 優先①：特商法セクション周辺のみを切り出してメール探索 ────────────
+      // 「特定商取引」「メールアドレス」「電子メール」「お問い合わせ先」
+      // などのキーワード周辺300文字を重点解析
+      const sectionKeywords = [
+        '特定商取引', 'メールアドレス', '電子メール', 'お問い合わせ先',
+        '連絡先', 'E-mail', 'e-mail', 'Email', 'mail'
+      ];
+      sectionKeywords.forEach(function(keyword) {
+        let pos = 0;
+        while ((pos = html.indexOf(keyword, pos)) !== -1) {
+          const snippet = html.substring(Math.max(0, pos - 50), pos + 300);
+          const mailtoInSnippet = snippet.match(/mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g);
+          if (mailtoInSnippet) {
+            mailtoInSnippet.forEach(function(m) {
+              const addr = m.replace('mailto:', '');
+              if (extractedEmails.indexOf(addr) === -1) extractedEmails.unshift(addr);
+            });
+          }
+          const emailInSnippet = snippet.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emailInSnippet) {
+            emailInSnippet.forEach(function(addr) {
+              if (isValidEmailCandidate(addr) && extractedEmails.indexOf(addr) === -1) {
+                extractedEmails.unshift(addr); // セクション周辺は先頭に追加して優先
+              }
+            });
+          }
+          pos += keyword.length;
+        }
+      });
+      // ─────────────────────────────────────────────────────────────────
+
+      // ── 優先②：mailtoリンクをページ全体から抽出 ─────────────────────────
+      const mailtoRegex = /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
+      let mailtoMatch;
+      while ((mailtoMatch = mailtoRegex.exec(html)) !== null) {
+        const addr = mailtoMatch[1];
+        if (extractedEmails.indexOf(addr) === -1) extractedEmails.unshift(addr);
+      }
+      // ─────────────────────────────────────────────────────────────────
+
+      // ── 補助③：ページ全体から正規表現でメールを抽出（最後尾に追加）───────
+      const allEmails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+      if (allEmails) {
+        allEmails.forEach(function(addr) {
+          if (isValidEmailCandidate(addr) && extractedEmails.indexOf(addr) === -1) {
+            extractedEmails.push(addr);
+          }
+        });
+      }
+      // ─────────────────────────────────────────────────────────────────
+
+      // メールが1件以上見つかった時点で残りのURLは不要なのでbreak
+      if (extractedEmails.length > 0) {
+        Logger.log('メール候補取得（' + companyName + '）: ' + extractedEmails.join(', '));
+        break;
+      }
+
+      Utilities.sleep(800);
+
+    } catch (e) {
+      Logger.log('フェッチ例外（' + targetUrl + '）: ' + e.toString());
+    }
+  }
+
+  // STEP4: 候補をGeminiでフィルタリング
+  if (extractedEmails.length > 0) {
+    return filterEmailByGemini(companyName, extractedEmails);
+  }
+
+  Logger.log('特商法ページからメール取得不可: ' + companyName);
+  return '×';
+}
+
+// ========================================================
+// ヘルパー関数：メールアドレス候補の妥当性チェック
+// ========================================================
+function isValidEmailCandidate(email) {
+  const invalidPatterns = [
+    '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp',
+    '.css', '.js', '.woff', '.ttf',
+    'example.com', 'schema.org', 'sentry', 'wixpress',
+    'email@', '@example', '@domain', '@yourdomain',
+    'noreply@', 'no-reply@'
+  ];
+  return !invalidPatterns.some(function(p) { return email.toLowerCase().includes(p); });
+}
+
+// ========================================================
+// ヘルパー関数：Geminiでメール候補を1件に絞る
+// ========================================================
+function filterEmailByGemini(companyName, candidates) {
+  const filterPrompt =
+    '以下のメールアドレス一覧の中から、企業「' + companyName + '」への営業メール送信先として最も適切なものを1つ選んでください。\n' +
+    '選定基準:\n' +
+    '- 優先: info@・contact@・pr@・sales@・support@・hello@\n' +
+    '- 除外: recruit@・career@・hr@・noreply@・no-reply@\n' +
+    '- ドメインが企業の公式サイトと一致するものを優先\n\n' +
+    '候補一覧:\n' + candidates.join('\n') + '\n\n' +
+    '以下のJSONのみ返してください。説明不要。\n' +
+    '{"email": "選んだメールアドレス"}';
+
+  const filterPayload = {
+    contents: [{ parts: [{ text: filterPrompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 128 }
+  };
+
+  const filterOptions = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(filterPayload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    Utilities.sleep(2000);
+    const filterResponse = UrlFetchApp.fetch(GEMINI_ENDPOINT + '?key=' + GEMINI_API_KEY, filterOptions);
+
+    if (filterResponse.getResponseCode() !== 200) {
+      Logger.log('Geminiフィルタリング失敗（HTTP ' + filterResponse.getResponseCode() + '）');
+      return candidates[0]; // フォールバック：先頭候補（セクション周辺で優先されたもの）
+    }
+
+    const filterJson = JSON.parse(filterResponse.getContentText());
+    const filterRaw = filterJson.candidates[0].content.parts[0].text;
+    const filterCleaned = filterRaw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+    const filterMatch = filterCleaned.match(/\{[\s\S]*\}/);
+    if (filterMatch) {
+      const filterParsed = JSON.parse(filterMatch[0]);
+      if (filterParsed.email && filterParsed.email !== '×') {
+        return filterParsed.email;
+      }
+    }
+    return candidates[0];
+  } catch (e) {
+    Logger.log('フィルタリングエラー: ' + e.toString());
+    return candidates[0];
+  }
+}
+
+// ========================================================
+// 追加関数：GeminiにURLを推定させる（Google Search API不使用版）
+// ── 修正③で新規追加
+// ========================================================
+function fetchOfficialUrlByGemini(companyName) {
+
+  // STEP1: まずGeminiで推測
+  const prompt =
+    '日本の企業「' + companyName + '」の公式サイトURLを1つだけ教えてください。\n' +
+    '実在するURLのみ回答し、不明な場合は"不明"と答えてください。説明不要。\n' +
+    '以下のJSONのみ返してください。\n' +
+    '{"url": "https://example.com または 不明"}';
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 128 }
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(GEMINI_ENDPOINT + '?key=' + GEMINI_API_KEY, options);
+    if (response.getResponseCode() === 200) {
+      const responseJson = JSON.parse(response.getContentText());
+      const rawText = responseJson.candidates[0].content.parts[0].text;
+      const cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        const geminiUrl = parsed.url || '不明';
+
+        // STEP2: GeminiのURLが有効か実際にアクセスして確認
+        if (geminiUrl !== '不明' && geminiUrl.startsWith('http')) {
+          try {
+            const checkResponse = UrlFetchApp.fetch(geminiUrl, {
+              muteHttpExceptions: true,
+              followRedirects: true
+            });
+            if (checkResponse.getResponseCode() === 200) {
+              Logger.log('Gemini URL有効: ' + geminiUrl);
+              return geminiUrl; // ✅ GeminiのURLが生きていればそのまま使用
+            }
+            Logger.log('Gemini URL無効（HTTP ' + checkResponse.getResponseCode() + '）→ SerpApiへ: ' + geminiUrl);
+          } catch (e) {
+            Logger.log('Gemini URLアクセスエラー→ SerpApiへ: ' + e.toString());
+          }
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log('GeminiURL推定エラー: ' + e.toString());
+  }
+
+  // STEP3: GeminiのURLが無効な場合のみSerpApiで検索
+  return fetchUrlBySerpApi(companyName);
+}
+
+// ========================================================
+// 追加関数：SerpApiでURLを検索（Gemini失敗時のフォールバック）
+// ========================================================
+function fetchUrlBySerpApi(companyName) {
+  try {
+    const query = encodeURIComponent(companyName + ' 公式サイト');
+    const serpUrl = 'https://serpapi.com/search.json?q=' + query
+      + '&hl=ja&gl=jp&api_key=' + SERP_API_KEY;
+
+    const response = UrlFetchApp.fetch(serpUrl, { muteHttpExceptions: true });
+
+    if (response.getResponseCode() !== 200) {
+      Logger.log('SerpApi失敗（HTTP ' + response.getResponseCode() + '）: ' + companyName);
+      return '不明';
+    }
+
+    const json = JSON.parse(response.getContentText());
+    const results = json.organic_results || [];
+
+    // SNS・まとめサイト・Wikipedia等を除いた最初のURLを返す
+    const excludeDomains = [
+      'wikipedia', 'twitter', 'instagram', 'facebook',
+      'linkedin', 'youtube', 'amazon', 'rakuten',
+      'tabelog', 'hotpepper', 'indeed', 'wantedly'
+    ];
+
+    for (let i = 0; i < results.length; i++) {
+      const link = results[i].link || '';
+      const isExcluded = excludeDomains.some(function(d) {
+        return link.includes(d);
+      });
+      if (!isExcluded && link.startsWith('http')) {
+        Logger.log('SerpApi URL取得成功（' + companyName + '）: ' + link);
+        return link;
+      }
+    }
+
+    Logger.log('SerpApi 有効URLなし: ' + companyName);
+    return '不明';
+
+  } catch (e) {
+    Logger.log('SerpApiエラー（' + companyName + '）: ' + e.toString());
+    return '不明';
+  }
+}
+
+// ========================================================
+// 追加関数：アタックリストの既存企業名を取得
+// ── 修正①で新規追加
+// ========================================================
+function getExistingCompanyNames(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < START_ROW) return [];
+  const numRows = lastRow - START_ROW + 1;
+  const values = sheet.getRange(START_ROW, COL_COMPANY, numRows, 1).getValues();
+  return values
+    .map(row => row[0].toString().trim())
+    .filter(name => name !== '');
+}
+
+// ========================================================
+// 共通関数：カテゴリ解決
+// ========================================================
+function resolveTargetSheet(category) {
+  if (VALID_CATEGORIES.indexOf(category) !== -1) return category;
+  return 'その他';
+}
+
+// ========================================================
+// 共通関数：次の書き込み行を取得（4行目起点）
+// ========================================================
+function getNextWriteRow(sheet) {
+  const START_ROW_WRITE = 4;
+  const CHECK_COLS = 4;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < START_ROW_WRITE) return START_ROW_WRITE;
+  const numRows = lastRow - START_ROW_WRITE + 1;
+  const values = sheet.getRange(START_ROW_WRITE, 1, numRows, CHECK_COLS).getValues();
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (values[i][0] || values[i][2] || values[i][3]) {
+      return START_ROW_WRITE + i + 1;
+    }
+  }
+  return START_ROW_WRITE;
+}
