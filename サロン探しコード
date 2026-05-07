@@ -13,11 +13,11 @@ function onOpen() {          // ← ここから追加
 }                            // ← ここまで追加
 
 // ========================================================
-// 大阪ヘアメイク美容室 リサーチ & メール送信ツール
+// 神戸ヘアメイク美容室 リサーチ & メール送信ツール
 // KANSAI COLLECTION 協賛営業向け
 // ========================================================
 
-const GEMINI_API_KEY = 'AIzaSyDcQMpv5N9O7n8sSue2dp0Om0qlK8mV4Jk';
+const GEMINI_API_KEY = 'AIzaSyBWvorcJor-IatHXvsmmZ3IX35G8Zh0gO8';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent';
 const SERP_API_KEY = 'aabe9443cad3f5928c7ac4a3f3efc4aa0cb0d0c19376eb58395902cc264cd869'
 const MAIL_SUBJECT_SALON = '【GAKUSEI RUNWAY 2026 SUMMER】のご案内'; // ✅ リネーム
@@ -30,9 +30,9 @@ const MAIL_BODY = `突然のご連絡失礼します。
 株式会社KANSAI COLLECTION 企画部にて
 アカウントエグゼクティブを務めております、笹崎と申します。
 当社は、京セラドームで開催される国内最大級のファッション＆エンターテインメントイベント『KANSAI COLLECTION』を主催している会社です。
-今回は『KANSAI COLLECTION 2026 AUTUMN & WINTER』のご案内に加え、名古屋では初開催となる２０２６年６月１３日（土）に開催予定の「GAKUSEI RUNWAY ２０２６ SUMMER」のご案内させていただきたいと思いご連絡差し上げました。
+この度は『KANSAI COLLECTION 2026 AUTUMN & WINTER』のご案内に加え、「GAKUSEI RUNWAY ２０２６ SUMMER in Osaka」のご案内させていただきたいと思いご連絡差し上げました。
 「GAKUSEI RUNWAY」は弊社関西コレクションが完全プロデュースしている一般の女子学生（小学校低学年〜大学・専門学生）の夢を応援するイベントでございます。
-今回より、「GAKUSEI RUNWAY」が名古屋へ進出することが決まりました。その第一回目を是非、御社のブランドにご協賛いただけないかと思い、ご連絡差し上げた次第です。
+今回より、「GAKUSEI RUNWAY」が名古屋へ進出することを踏まえまして、更なる盛り上がりが期待でき、是非とも御社のブランドにご協賛いただけないかと思い、ご連絡差し上げた次第です。
 夢を追いかけて頑張る女子学生（小学生〜中高生）と観客を対象に、衣装提供や会場内CM等による貴社活動のPRの場として、ぜひ一度お話させていただきたく存じます。
 先ずは当社のことをより知っていただき、
 内容について簡単にご説明をさせていただきたく存じますので
@@ -362,10 +362,10 @@ function sendMail_Salon() {
 // ========================================================
 function callGeminiForSalonInfo(salonName) {
   const prompt =
-    '大阪の美容室・ヘアサロン「' + salonName + '」について以下のJSONのみ返してください。説明不要。\n' +
+    '神戸の美容室・ヘアサロン「' + salonName + '」について以下のJSONのみ返してください。説明不要。\n' +
     '{\n' +
     '  "officialName": "正式名称",\n' +
-    '  "area": "梅田・北大阪 / 心斎橋・難波 / 天王寺・阿倍野 / 堀江・西区 / その他大阪 のどれか",\n' +
+    '"area": "三宮・中央区 / 元町・神戸駅周辺 / 北野・山の手 / 須磨・垂水 / その他神戸 のどれか",'
     '  "websiteUrl": "公式サイトURL（https://から始まる完全な形式。不明な場合は不明）"\n' +
     '}';
 
@@ -407,9 +407,9 @@ function searchFiveSalonsByGemini(existingNames) {
 
   const prompt =
     'あなたは関西コレクション（関コレ）の協賛枠を販売する戦略営業コンサルタントです。\n' +
-    '大阪府内でヘアメイク施術が可能な美容室・ヘアサロンを5件選定してください。\n\n' +
+    '神戸市内でヘアメイク施術が可能な美容室・ヘアサロンを5件選定してください。\n\n' +
     '【ターゲット選定基準】\n' +
-    '1. 所在地: 大阪府内（梅田・心斎橋・難波・堀江・天王寺・北大阪エリア等）\n' +
+    '1. 所在地: 神戸市内（三宮・元町・北野・須磨・垂水・灘・東灘エリア等）\n'
     '2. 施術対応: ヘアカット＋ヘアメイク（セット・ウィッグ・スタイリング）が可能なサロン\n' +
     '3. ターゲット層: 10〜20代女性をメインターゲットとするサロン\n' +
     '4. SNS活用: InstagramやTikTokでの発信が活発で、フォロワー数が多いサロン\n' +
@@ -418,7 +418,7 @@ function searchFiveSalonsByGemini(existingNames) {
     '7. 毎回異なるサロンを選定すること。\n\n' +
     exclusionText +
     '【出力形式】\n以下のJSONのみ返してください。Markdownのコードブロックや説明文は絶対に含めないこと。\n' +
-    '{\n  "salons": [\n    {\n      "salonName": "サロン名",\n      "area": "梅田・北大阪 / 心斎橋・難波 / 天王寺・阿倍野 / 堀江・西区 / その他大阪 のどれか",\n      "url": "公式サイトURL（https://から始まる完全な形式。不明な場合は不明。架空URLは絶対に作らないこと）"\n    }\n  ]\n}\n\nsalonsは必ず5件返してください。';
+    '{\n  "salons": [\n    {\n      "salonName": "サロン名",\n      "area": "三宮・中央区 / 元町・神戸駅周辺 / 北野・山の手 / 須磨・垂水 / その他神戸 のどれか",\n      "url": "公式サイトURL（https://から始まる完全な形式。不明な場合は不明。架空URLは絶対に作らないこと）"\n    }\n  ]\n}\n\nsalonsは必ず5件返してください。';
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -442,7 +442,7 @@ function searchFiveSalonsByGemini(existingNames) {
 
   const parsed = JSON.parse(match[0]);
   return (parsed.salons || []).map(function(s) {
-    return { salonName: s.salonName || '', area: s.area || 'その他大阪', url: s.url || '不明' };
+    return { salonName: s.salonName || '', area: s.area || 'その他神戸', url: s.url || '不明' };
   });
 }
 
