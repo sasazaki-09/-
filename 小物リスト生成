@@ -1,0 +1,267 @@
+# ============================================================
+# 全工程一括実行
+# ============================================================
+
+from google.colab import auth, files
+import requests, os, shutil
+from io import BytesIO
+from openpyxl import load_workbook
+from pptx import Presentation
+from PIL import Image as PILImage
+from google.auth import default
+from google.auth.transport.requests import Request
+
+# 1. Google認証
+print("🔑 Google認証中...")
+auth.authenticate_user()
+creds, _ = default()
+auth_req = Request()
+creds.refresh(auth_req)
+print("  認証完了！")
+
+# 2. スプレッドシートをExcelとしてダウンロード
+print("\n📥 スプレッドシートをダウンロード中...")
+SPREADSHEET_ID = "1A5zAAZv9tpknuGtNaDRVvYA6H1kRgRlJmt1oJE6RXz8"
+GID = "795366735"
+
+creds.refresh(auth_req)
+export_url = (
+    f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export"
+    f"?format=xlsx&gid={GID}"
+)
+headers = {"Authorization": f"Bearer {creds.token}"}
+response = requests.get(export_url, headers=headers)
+print(f"  ステータスコード: {response.status_code}")
+if response.status_code == 200:
+    with open("/content/excel_input.xlsx", "wb") as f:
+        f.write(response.content)
+    print(f"  完了！ サイズ: {len(response.content)/1024:.1f} KB")
+else:
+    print(f"  ❌ エラー: {response.status_code}")
+    raise RuntimeError(f"ダウンロード失敗: {response.status_code}")
+
+# 3. パワポファイルを自動検出
+print("\n📊 パワポファイルを検索中...")
+pptx_files = [f for f in os.listdir('/content') if f.endswith('.pptx') and f != 'pptx_input.pptx']
+if pptx_files:
+    pptx_file = pptx_files[0]
+    print(f"  見つかりました: {pptx_file}")
+    shutil.copy(f'/content/{pptx_file}', '/content/pptx_input.pptx')
+elif os.path.exists('/content/pptx_input.pptx'):
+    print("  pptx_input.pptxをそのまま使用します")
+    pptx_file = 'pptx_input.pptx'
+else:
+    print("  見つからないためアップロードしてください...")
+    uploaded = files.upload()
+    pptx_files = [f for f in os.listdir('/content') if f.endswith('.pptx')]
+    pptx_file = pptx_files[0]
+    shutil.copy(f'/content/{pptx_file}', '/content/pptx_input.pptx')
+print(f"  使用ファイル: {pptx_file}")
+
+# ============================================================
+# 設定
+# ============================================================
+PPTX_INPUT  = '/content/pptx_input.pptx'
+PPTX_OUTPUT = '/content/資料B_更新済み.pptx'
+EXCEL_PATH  = '/content/excel_input.xlsx'
+NO_IMAGE    = " - "
+
+# ============================================================
+# A列ラベルから行番号を自動取得
+# ============================================================
+def get_label_rows(path):
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active
+
+    label_rows = {}
+    for row in ws.iter_rows(min_col=1, max_col=1):
+        for cell in row:
+            if cell.value:
+                val = str(cell.value).strip()
+                if val == 'モデル名':
+                    label_rows['name'] = cell.row
+                elif val == 'モデル写真':
+                    label_rows['face'] = cell.row
+                elif val == '下駄':
+                    label_rows['shoes'] = cell.row
+                elif val == '他小物':
+                    label_rows['item'] = cell.row
+
+    return label_rows
+
+# ============================================================
+# Excel読み込み関数
+# ============================================================
+def get_embedded_images(path):
+    wb = load_workbook(path)
+    ws = wb.active
+    images = {}
+    for img in ws._images:
+        anchor = img.anchor
+        if hasattr(anchor, '_from'):
+            row = anchor._from.row + 1
+            col = anchor._from.col + 1
+        else:
+            row = anchor.row + 1
+            col = anchor.col + 1
+        try:
+            raw = img.ref
+            if hasattr(raw, 'read'):
+                raw.seek(0)
+            pil_img = PILImage.open(raw).copy()
+            if (row, col) not in images:
+                images[(row, col)] = pil_img
+        except Exception as e:
+            print(f"  ⚠ 画像取得失敗 ({row},{col}): {e}")
+    return images
+
+def get_cell_values(path):
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active
+    values = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is not None:
+                values[(cell.row, cell.column)] = cell.value
+    return values
+
+# ============================================================
+# パワポ操作関数
+# ============================================================
+def replace_picture(shape, pil_image):
+    buf = BytesIO()
+    pil_image.save(buf, format="PNG")
+    buf.seek(0)
+    blip = shape._element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip')
+    if blip is None:
+        return False
+    r_embed = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
+    _, new_rId = shape.part.get_or_add_image_part(buf)
+    blip.set(r_embed, new_rId)
+    return True
+
+def delete_picture(shape):
+    sp = shape._element
+    sp.getparent().remove(sp)
+    return True
+
+def set_cell_text(cell, text):
+    for para in cell.text_frame.paragraphs:
+        for run in para.runs:
+            run.text = ""
+    if cell.text_frame.paragraphs[0].runs:
+        cell.text_frame.paragraphs[0].runs[0].text = str(text)
+    else:
+        cell.text_frame.paragraphs[0].text = str(text)
+
+# ============================================================
+# メイン処理
+# ============================================================
+print("\n📂 Excel読み込み中...")
+cell_values   = get_cell_values(EXCEL_PATH)
+embedded_imgs = get_embedded_images(EXCEL_PATH)
+print(f"  テキスト: {len(cell_values)}件 / 画像: {len(embedded_imgs)}件")
+
+# A列ラベルから行番号を自動取得
+print("\n🔍 行番号を自動取得中...")
+label_rows = get_label_rows(EXCEL_PATH)
+print(f"  取得結果: {label_rows}")
+
+ROW_NAME  = label_rows.get('name')
+ROW_FACE  = label_rows.get('face')
+ROW_SHOES = label_rows.get('shoes')
+ROW_ITEM  = label_rows.get('item')
+
+if not all([ROW_NAME, ROW_FACE, ROW_SHOES, ROW_ITEM]):
+    print(f"  ⚠ 取得できなかった行: name={ROW_NAME}, face={ROW_FACE}, shoes={ROW_SHOES}, item={ROW_ITEM}")
+    raise RuntimeError("行番号の自動取得に失敗しました。A列のラベルを確認してください。")
+
+print(f"  モデル名行: {ROW_NAME}")
+print(f"  顔画像行:   {ROW_FACE}")
+print(f"  下駄画像行: {ROW_SHOES}")
+print(f"  小物画像行: {ROW_ITEM}")
+
+# 対象行の画像確認
+print("\n=== 対象行の画像確認 ===")
+for row_num, label in [(ROW_FACE,'顔'), (ROW_SHOES,'下駄'), (ROW_ITEM,'小物')]:
+    cols_with_img = [chr(ord('A')+c-1) for c in range(2,24) if (row_num,c) in embedded_imgs]
+    print(f"  {label}（行{row_num}）: {cols_with_img}")
+
+print("\n📊 PowerPoint読み込み中...")
+prs = Presentation(PPTX_INPUT)
+print(f"  スライド数: {len(prs.slides)}")
+
+# スライド3削除
+slides_xml = prs.slides._sldIdLst
+slide_ids = list(slides_xml)
+if len(slide_ids) >= 3:
+    slides_xml.remove(slide_ids[2])
+    print("  スライド3削除")
+
+# スライド1: B〜L列 / スライド2: M〜W列
+slide_col_ranges = [
+    (0, list(range(2, 13))),
+    (1, list(range(13, 24))),
+]
+
+for slide_idx, cols in slide_col_ranges:
+    slide = prs.slides[slide_idx]
+    pic_shapes = [sh for sh in slide.shapes if sh.shape_type == 13]
+
+    # グループ分け（top値で判定）
+    face_group  = sorted([sh for sh in pic_shapes if 1900000 < sh.top < 2000000], key=lambda s: s.left)
+    item_group  = sorted([sh for sh in pic_shapes if 3100000 < sh.top < 3200000], key=lambda s: s.left)
+    shoes_group = sorted([sh for sh in pic_shapes if 4500000 < sh.top < 5000000], key=lambda s: s.left)
+
+    print(f"\n=== スライド{slide_idx+1} ===")
+    print(f"  顔:{len(face_group)}枚 小物:{len(item_group)}枚 下駄:{len(shoes_group)}枚")
+
+    for person_idx, col in enumerate(cols):
+        name_val  = cell_values.get((ROW_NAME,  col), NO_IMAGE)
+        face_img  = embedded_imgs.get((ROW_FACE,  col))
+        shoes_img = embedded_imgs.get((ROW_SHOES, col))
+        item_img  = embedded_imgs.get((ROW_ITEM,  col))
+
+        col_letter = chr(ord('A') + col - 1)
+        print(f"  [{person_idx+1}] {col_letter}列 {name_val} | 顔={'✅' if face_img else '❌'} 下駄={'✅' if shoes_img else '❌'} 小物={'✅' if item_img else '❌'}")
+
+        # 顔画像
+        if person_idx < len(face_group):
+            if face_img:
+                replace_picture(face_group[person_idx], face_img)
+            else:
+                delete_picture(face_group[person_idx])
+
+        # 下駄画像
+        if person_idx < len(shoes_group):
+            if shoes_img:
+                replace_picture(shoes_group[person_idx], shoes_img)
+            else:
+                delete_picture(shoes_group[person_idx])
+
+        # 小物画像
+        if item_group:
+            target_left = face_group[person_idx].left if person_idx < len(face_group) else 0
+            closest = min(item_group, key=lambda s: abs(s.left - target_left))
+            if item_img:
+                replace_picture(closest, item_img)
+            else:
+                delete_picture(closest)
+            item_group.remove(closest)
+
+    # テーブルの名前更新
+    for sh in slide.shapes:
+        if sh.shape_type == 19:
+            table = sh.table
+            for person_idx, col in enumerate(cols):
+                name_val = cell_values.get((ROW_NAME, col), NO_IMAGE)
+                tc = person_idx + 1
+                set_cell_text(table.cell(0, tc), str(name_val))
+
+print("\n✅ 保存中...")
+prs.save(PPTX_OUTPUT)
+print("🎉 完了！ → /content/資料B_更新済み.pptx")
+
+# ダウンロード
+print("\n📥 ダウンロード開始...")
+files.download('/content/資料B_更新済み.pptx')
