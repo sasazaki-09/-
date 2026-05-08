@@ -1,6 +1,48 @@
 # ============================================================
 # 全工程一括実行
 # ============================================================
+# ============================================================
+# 入力方法を選択してください
+# ============================================================
+print("入力方法を選択してください")
+print("1: URLで受け取った場合")
+print("2: ファイルで受け取った場合")
+
+INPUT_MODE = input("番号を入力（1 or 2）: ")
+
+if INPUT_MODE == "1":
+    SHEET_URL = input("URLを貼り付けてください: ")
+    SPREADSHEET_ID, GID = extract_ids_from_url(SHEET_URL)
+    print(f"  SPREADSHEET_ID: {SPREADSHEET_ID}")
+    print(f"  GID: {GID}")
+
+elif INPUT_MODE == "2":
+    print("ファイルをアップロードしてください")
+    uploaded = files.upload()
+    uploaded_filename = list(uploaded.keys())[0]
+    print(f"  アップロードされたファイル: {uploaded_filename}")
+# ============================================================
+# URLを貼り付けるだけで自動的にIDとGIDを取得
+# ============================================================
+import re
+
+# ここにメールで受け取ったURLを貼り付ける
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1A5zAAZv9tpknuGtNaDRVvYA6H1kRgRlJmt1oJE6RXz8/edit?pli=1&gid=795366735#gid=795366735"
+
+def extract_ids_from_url(url):
+    spreadsheet_id = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
+    gid = re.search(r'gid=(\d+)', url)
+    spreadsheet_id = spreadsheet_id.group(1) if spreadsheet_id else None
+    gid = gid.group(1) if gid else None
+    return spreadsheet_id, gid
+
+SPREADSHEET_ID, GID = extract_ids_from_url(SHEET_URL)
+print(f"SPREADSHEET_ID: {SPREADSHEET_ID}")
+print(f"GID: {GID}")
+
+# 取得できなかった場合はエラー
+if not SPREADSHEET_ID or not GID:
+    raise RuntimeError("URLからIDの取得に失敗しました。URLを確認してください。")
 
 from google.colab import auth, files
 import requests, os, shutil
