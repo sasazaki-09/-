@@ -10,6 +10,7 @@ from pptx import Presentation
 from PIL import Image as PILImage
 from google.auth import default
 from google.auth.transport.requests import Request
+import math
 
 # 1. Google認証
 print("🔑 Google認証中...")
@@ -65,6 +66,7 @@ PPTX_INPUT  = '/content/pptx_input.pptx'
 PPTX_OUTPUT = '/content/資料B_更新済み.pptx'
 EXCEL_PATH  = '/content/excel_input.xlsx'
 NO_IMAGE    = " - "
+PEOPLE_PER_SLIDE = 11  # 1スライドあたりの人数
 
 # ============================================================
 # A列ラベルから行番号を自動取得
@@ -86,7 +88,6 @@ def get_label_rows(path):
                     label_rows['shoes'] = cell.row
                 elif val == '他小物':
                     label_rows['item'] = cell.row
-
     return label_rows
 
 # ============================================================
@@ -154,6 +155,16 @@ def set_cell_text(cell, text):
     else:
         cell.text_frame.paragraphs[0].text = str(text)
 
+def clear_table_cell(cell):
+    """テーブルセルを空白にする"""
+    for para in cell.text_frame.paragraphs:
+        for run in para.runs:
+            run.text = ""
+    if cell.text_frame.paragraphs[0].runs:
+        cell.text_frame.paragraphs[0].runs[0].text = ""
+    else:
+        cell.text_frame.paragraphs[0].text = ""
+
 # ============================================================
 # メイン処理
 # ============================================================
@@ -176,34 +187,50 @@ if not all([ROW_NAME, ROW_FACE, ROW_SHOES, ROW_ITEM]):
     print(f"  ⚠ 取得できなかった行: name={ROW_NAME}, face={ROW_FACE}, shoes={ROW_SHOES}, item={ROW_ITEM}")
     raise RuntimeError("行番号の自動取得に失敗しました。A列のラベルを確認してください。")
 
-print(f"  モデル名行: {ROW_NAME}")
-print(f"  顔画像行:   {ROW_FACE}")
-print(f"  下駄画像行: {ROW_SHOES}")
-print(f"  小物画像行: {ROW_ITEM}")
+print(f"  モデル名行: {ROW_NAME} / 顔画像行: {ROW_FACE} / 下駄画像行: {ROW_SHOES} / 小物画像行: {ROW_ITEM}")
+
+# 出演者の列を特定（B列=2から名前があるものを抽出）
+all_cols = []
+for col in range(2, 50):
+    name_val = cell_values.get((ROW_NAME, col))
+    if name_val and str(name_val).strip() not in ['', ' - ']:
+        all_cols.append(col)
+
+total_people = len(all_cols)
+total_slides_needed = math.ceil(total_people / PEOPLE_PER_SLIDE)
+print(f"\n👥 出演者数: {total_people}人 / 必要スライド数: {total_slides_needed}枚")
 
 # 対象行の画像確認
 print("\n=== 対象行の画像確認 ===")
 for row_num, label in [(ROW_FACE,'顔'), (ROW_SHOES,'下駄'), (ROW_ITEM,'小物')]:
-    cols_with_img = [chr(ord('A')+c-1) for c in range(2,24) if (row_num,c) in embedded_imgs]
+    cols_with_img = [chr(ord('A')+c-1) for c in range(2,50) if (row_num,c) in embedded_imgs]
     print(f"  {label}（行{row_num}）: {cols_with_img}")
 
 print("\n📊 PowerPoint読み込み中...")
 prs = Presentation(PPTX_INPUT)
 print(f"  スライド数: {len(prs.slides)}")
 
-# スライド3削除
+# 不要なスライドを削除（後ろから削除）
 slides_xml = prs.slides._sldIdLst
 slide_ids = list(slides_xml)
-if len(slide_ids) >= 3:
-    slides_xml.remove(slide_ids[2])
-    print("  スライド3削除")
+total_template_slides = len(slide_ids)
 
-# スライド1: B〜L列 / スライド2: M〜W列
-slide_col_ranges = [
-    (0, list(range(2, 13))),
-    (1, list(range(13, 24))),
-]
+# 必要スライド数より多い分を削除
+for i in range(total_template_slides - 1, total_slides_needed - 1, -1):
+    slides_xml.remove(slide_ids[i])
+    print(f"  スライド{i+1}削除")
 
+print(f"  残スライド数: {len(prs.slides)}")
+
+# スライドごとの列範囲を動的に生成
+slide_col_ranges = []
+for slide_idx in range(total_slides_needed):
+    start = slide_idx * PEOPLE_PER_SLIDE
+    end = min(start + PEOPLE_PER_SLIDE, total_people)
+    cols = all_cols[start:end]
+    slide_col_ranges.append((slide_idx, cols))
+
+# 各スライドを処理
 for slide_idx, cols in slide_col_ranges:
     slide = prs.slides[slide_idx]
     pic_shapes = [sh for sh in slide.shapes if sh.shape_type == 13]
@@ -211,52 +238,72 @@ for slide_idx, cols in slide_col_ranges:
     # グループ分け（top値で判定）
     face_group  = sorted([sh for sh in pic_shapes if 1900000 < sh.top < 2000000], key=lambda s: s.left)
     item_group  = sorted([sh for sh in pic_shapes if 3100000 < sh.top < 3200000], key=lambda s: s.left)
-    shoes_group = sorted([sh for sh in pic_shapes if 4500000 < sh.top < 5000000], key=lambda s: s.left)
+    shoes_group = sorted([sh for sh in pic_shapes if 4500000 < sh.top < 4700000], key=lambda s: s.left)
 
     print(f"\n=== スライド{slide_idx+1} ===")
     print(f"  顔:{len(face_group)}枚 小物:{len(item_group)}枚 下駄:{len(shoes_group)}枚")
 
-    for person_idx, col in enumerate(cols):
-        name_val  = cell_values.get((ROW_NAME,  col), NO_IMAGE)
-        face_img  = embedded_imgs.get((ROW_FACE,  col))
-        shoes_img = embedded_imgs.get((ROW_SHOES, col))
-        item_img  = embedded_imgs.get((ROW_ITEM,  col))
+    for person_idx in range(PEOPLE_PER_SLIDE):
+        # 実際の出演者がいる場合
+        if person_idx < len(cols):
+            col = cols[person_idx]
+            name_val  = cell_values.get((ROW_NAME,  col), NO_IMAGE)
+            face_img  = embedded_imgs.get((ROW_FACE,  col))
+            shoes_img = embedded_imgs.get((ROW_SHOES, col))
+            item_img  = embedded_imgs.get((ROW_ITEM,  col))
 
-        col_letter = chr(ord('A') + col - 1)
-        print(f"  [{person_idx+1}] {col_letter}列 {name_val} | 顔={'✅' if face_img else '❌'} 下駄={'✅' if shoes_img else '❌'} 小物={'✅' if item_img else '❌'}")
+            col_letter = chr(ord('A') + col - 1)
+            print(f"  [{person_idx+1}] {col_letter}列 {name_val} | 顔={'✅' if face_img else '❌'} 下駄={'✅' if shoes_img else '❌'} 小物={'✅' if item_img else '❌'}")
 
-        # 顔画像
-        if person_idx < len(face_group):
-            if face_img:
-                replace_picture(face_group[person_idx], face_img)
-            else:
+            # 顔画像
+            if person_idx < len(face_group):
+                if face_img:
+                    replace_picture(face_group[person_idx], face_img)
+                else:
+                    delete_picture(face_group[person_idx])
+
+            # 下駄画像
+            if person_idx < len(shoes_group):
+                if shoes_img:
+                    replace_picture(shoes_group[person_idx], shoes_img)
+                else:
+                    delete_picture(shoes_group[person_idx])
+
+            # 小物画像（画像がある人のみスロットに割り当て）
+            if item_group:
+                target_left = face_group[person_idx].left if person_idx < len(face_group) else 0
+                closest = min(item_group, key=lambda s: abs(s.left - target_left))
+                if item_img:
+                    replace_picture(closest, item_img)  # 画像あり→置き換え
+                else:
+                    delete_picture(closest)             # 画像なし→削除
+                item_group.remove(closest)
+
+        # 余剰枠（出演者がいない枠）の処理
+        else:
+            print(f"  [{person_idx+1}] 余剰枠 → 画像・名前を削除")
+
+            # 顔画像削除
+            if person_idx < len(face_group):
                 delete_picture(face_group[person_idx])
 
-        # 下駄画像
-        if person_idx < len(shoes_group):
-            if shoes_img:
-                replace_picture(shoes_group[person_idx], shoes_img)
-            else:
+            # 下駄画像削除
+            if person_idx < len(shoes_group):
                 delete_picture(shoes_group[person_idx])
-
-        # 小物画像
-        if item_group:
-            target_left = face_group[person_idx].left if person_idx < len(face_group) else 0
-            closest = min(item_group, key=lambda s: abs(s.left - target_left))
-            if item_img:
-                replace_picture(closest, item_img)
-            else:
-                delete_picture(closest)
-            item_group.remove(closest)
 
     # テーブルの名前更新
     for sh in slide.shapes:
         if sh.shape_type == 19:
             table = sh.table
-            for person_idx, col in enumerate(cols):
-                name_val = cell_values.get((ROW_NAME, col), NO_IMAGE)
+            for person_idx in range(PEOPLE_PER_SLIDE):
                 tc = person_idx + 1
-                set_cell_text(table.cell(0, tc), str(name_val))
+                if person_idx < len(cols):
+                    col = cols[person_idx]
+                    name_val = cell_values.get((ROW_NAME, col), NO_IMAGE)
+                    set_cell_text(table.cell(0, tc), f"{str(name_val)}")
+                else:
+                    # 余剰枠は空白に
+                    clear_table_cell(table.cell(0, tc))
 
 print("\n✅ 保存中...")
 prs.save(PPTX_OUTPUT)
