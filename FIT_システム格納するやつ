@@ -276,8 +276,6 @@ def create_pierce_kokomono_image(template_path, pierce_img, kokomono_img):
     H = int(prs.slide_height / EMU_PER_PX)
 
     canvas = PILImage.new('RGB', (W, H), 'white')
-    for s in pic_shapes:
-        print(f"  [他小物DEBUG] left={int(s.left/EMU_PER_PX)} top={int(s.top/EMU_PER_PX)} w={int(s.width/EMU_PER_PX)} h={int(s.height/EMU_PER_PX)}")
 
     # 画像スロットをleft順（左=ピアス、右=他小物）で取得
     pic_shapes = sorted(
@@ -285,17 +283,22 @@ def create_pierce_kokomono_image(template_path, pierce_img, kokomono_img):
         key=lambda s: s.left
     )
 
+    # キャンバスを左右2分割して各画像をフィットさせる
+    margin = int(W * 0.04)  # 4%余白
+    slot_w = (W - margin * 3) // 2
+    slot_h = int(H * 0.75)
+    top_y = (H - slot_h) // 2
+
     imgs = [pierce_img, kokomono_img]
-    for i, shape in enumerate(pic_shapes[:2]):
-        if imgs[i] is None:
+    for i, img in enumerate(imgs):
+        if img is None:
             continue
-        x = int(shape.left / EMU_PER_PX)
-        y = int(shape.top / EMU_PER_PX)
-        w = int(shape.width / EMU_PER_PX)
-        h = int(shape.height / EMU_PER_PX)
-        img = imgs[i].copy().convert('RGB')
-        img = img.resize((w, h), PILImage.LANCZOS)
-        canvas.paste(img, (x, y))
+        x = margin + i * (slot_w + margin)
+        pil_img = img.copy().convert('RGB')
+        pil_img.thumbnail((slot_w, slot_h), PILImage.LANCZOS)
+        paste_x = x + (slot_w - pil_img.width) // 2
+        paste_y = top_y + (slot_h - pil_img.height) // 2
+        canvas.paste(pil_img, (paste_x, paste_y))
 
     return canvas
 
